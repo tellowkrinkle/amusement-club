@@ -50,22 +50,22 @@ async function list(user, args, channelID, callback) {
     args.map(a => {
         if(a[0] === '!' || a[0] === '-') {
             let el = a.substr(1);
-            let m = a[0] == '!'? { $ne: user.id } : user.id;
+            let m = a[0] === '!'? { $ne: user.id } : user.id;
             switch(el){
                 case 'me':
                     match.author = m;
                     title = "Your auctions";
-                    args = args.filter(arg => arg != a);
+                    args = args.filter(arg => arg !== a);
                     break;
                 case 'bid':
                     match.lastbidder = m;
                     title = "Your bids";
-                    args = args.filter(arg => arg != a);
+                    args = args.filter(arg => arg !== a);
                     break;
                 case 'diff':
                     useDiff = true;
                     title = "Auctions with unique cards";
-                    args = args.filter(arg => arg != a);
+                    args = args.filter(arg => arg !== a);
                     break;
             }
         }
@@ -80,11 +80,11 @@ async function list(user, args, channelID, callback) {
 
     if(useDiff) {
         let userCards = await ucollection.findOne({discord_id: user.id}, {cards: 1});
-        auctionList = auctionList.filter(a => userCards.cards.filter(c => utils.cardsMatch(a.card, c)) == 0);
+        auctionList = auctionList.filter(a => userCards.cards.filter(c => utils.cardsMatch(a.card, c)) === 0);
     }
 
     let pages = getPages(auctionList, user.id);
-    if(pages.length == 0) return callback(utils.formatError(user, null, 
+    if(pages.length === 0) return callback(utils.formatError(user, null, 
         "no auctions with that request found"));
 
     reactions.addNewPagination(user.id, title, pages, channelID);
@@ -103,7 +103,7 @@ async function bid(user, args, callback) {
     if(!auc)
         return callback(utils.formatError(user, null, "auction `" + args[0] + "` not found"));
 
-    if(auc.author == user.id) 
+    if(auc.author === user.id) 
         return callback(utils.formatError(user, null, "you can't bid on your own auction"));
 
     if(auc.finished)
@@ -130,7 +130,7 @@ async function bid(user, args, callback) {
     if(dbUser.exp < price)
         return callback(utils.formatError(user, null, "you do not have enough tomatoes for that bid"));
 
-    if(auc.lastbidder && auc.lastbidder == user.id) 
+    if(auc.lastbidder && auc.lastbidder === user.id) 
         return callback(utils.formatError(user, null, "you already bidded on that auction"));
 
     let hidebid = heroes.getHeroEffect(dbUser, 'auc', false);
