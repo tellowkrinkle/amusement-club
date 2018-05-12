@@ -4,3 +4,7 @@ settings/ayano.json
 april/
 dump/
 settings/general.json
+
+# MacOS stuff
+._*
+.DS_Store
