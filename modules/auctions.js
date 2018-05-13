@@ -116,13 +116,6 @@ async function bid(user, args, callback) {
         return callback(utils.formatError(user, null, bidresp));
     }
 
-    aucPrice = Math.floor(aucPrice * 1.5);
-    if(price > aucPrice)  {
-        let bidresp = "your bid for this auction can't be higher than **" + aucPrice + "**🍅";
-        if(auc.hidebid) bidresp = "your bid is **too high**! Bid amount is hidden by hero effect.";
-        return callback(utils.formatError(user, null, bidresp));
-    }
-
     let dbUser = await ucollection.findOne({discord_id: user.id});
     if(!dbUser.hero)
         return callback(utils.formatError(user, null, "you have to have a hero in order to take part in auction"));
@@ -130,15 +123,32 @@ async function bid(user, args, callback) {
     if(dbUser.exp < price)
         return callback(utils.formatError(user, null, "you do not have enough tomatoes for that bid"));
 
-    if(auc.lastbidder && auc.lastbidder === user.id) 
-        return callback(utils.formatError(user, null, "you already bidded on that auction"));
+    let previousPricePaid = auc.price;
+    if (auc.highBid) {
+        previousPricePaid = auc.highBid;
+    }
+
+    if(auc.lastbidder && auc.lastbidder === user.id) {
+        let priceDifference = price - previousPricePaid;
+        if (dbUser.exp < priceDifference) {
+            return callback(utils.formatError(user, null, "you do not have enough tomatoes to raise your bid that much"));
+        }
+        await ucollection.update({discord_id: user.id}, {$inc: {exp: -priceDifference}});
+        await acollection.update({_id: auc._id}, {$set: {highBid: price}});
+        return callback(utils.formatConfirm(user, "Bid Updated", `You ${price > previousPricePaid ? "increased" : "decreased"} your bid by ${Math.abs(priceDifference)} to ${price}`));
+    }
+
+    if (auc.highBid && price <= auc.highBid) {
+        await acollection.update({_id: auc._id}, {$set: {price: price}});
+        return callback(utils.formatError(user, null, `You bid ${price} but were instantly outbid.  Try bidding higher?`));
+    }
 
     let hidebid = heroes.getHeroEffect(dbUser, 'auc', false);
     addExtraTime(auc);
 
     await ucollection.update({discord_id: user.id}, {$inc: {exp: -price}});
     if(auc.lastbidder) {
-        await ucollection.update({discord_id: auc.lastbidder}, {$inc: {exp: auc.price}});
+        await ucollection.update({discord_id: auc.lastbidder}, {$inc: {exp: previousPricePaid}});
         auc.price = price;
         let strprice = hidebid? "???" : price;
         let msg = "Another player has outbid you on card **" + utils.getFullCard(auc.card)  + "** with a bid of **" + strprice + "**🍅\n";
@@ -150,23 +160,21 @@ async function bid(user, args, callback) {
         bot.sendMessage({to: auc.lastbidder, embed: utils.formatWarning(null, "Oh no!", msg)});
     } else {
         auc.price = price;
-        let strprice = hidebid? "???" : price;
-        let msg = "A player has bid on your card **" + utils.getFullCard(auc.card)  + "** with a bid of **" + strprice + "**🍅\n";
-
-        if(hidebid) msg += "The bid is hidden by hero effect.\n";
-        msg += "This auction will end in **" + getTime(auc) + "**";
+        let msg = `A player has bid on your card **${utils.getFullCard(auc.card)}**\n`;
+        msg += `This auction will end in **${getTime(auc)}**`;
         bot.sendMessage({to: auc.author, embed: utils.formatInfo(null, "Yay!", msg)});
     }
 
     await acollection.update({_id: auc._id}, {$set: {
-        price: price, 
+        price: previousPricePaid,
+        highBid: price, 
         lastbidder: user.id, 
         hidebid: hidebid, 
         timeshift: auc.timeshift,
         date: auc.date
     }});
 
-    let p = utils.formatConfirm(user, "Bid placed", "you are now leading in auction for **" + utils.getFullCard(auc.card) + "**!");
+    let p = utils.formatConfirm(user, "Bid placed", "you are now leading in the auction for **" + utils.getFullCard(auc.card) + "**!");
     p.footer = {text: "Auction ID: " + auc.id}
     callback(p);
 
@@ -313,7 +321,12 @@ async function checkAuctionList() {
     if(auc.lastbidder) {
         let bidder = await ucollection.findOne({discord_id: auc.lastbidder});
         bidder.cards = dbManager.addCardToUser(bidder.cards, auc.card);
-        let tomatoback = Math.floor(forge.getCardEffect(bidder, 'auc', auc.price)[0]);
+        let cardTomatoBack = Math.floor(forge.getCardEffect(bidder, 'auc', auc.price)[0]);
+        let priceDifferenceTomatoBack = 0;
+        if (auc.highBid) {
+            priceDifferenceTomatoBack = auc.highBid - auc.price;
+        }
+        let tomatoback = cardTomatoBack + priceDifferenceTomatoBack;
         await ucollection.update({discord_id: auc.lastbidder}, {$set: {cards: bidder.cards}, $inc: {exp: tomatoback}});
         await ucollection.update({discord_id: auc.author}, {$inc: {exp: auc.price}});
 
@@ -322,12 +335,19 @@ async function checkAuctionList() {
         transaction.card = auc.card;
         await tcollection.insert(transaction);
 
-        let yaaymes = "You won an auction for **" + utils.getFullCard(auc.card) + "**!\nCard is now yours.\n";
-        if(tomatoback > 0) yaaymes += "You got **" + tomatoback + "** tomatoes back from that transaction.";
+        let yaaymes = `You won an auction for **${utils.getFullCard(auc.card)}**!\nThe card is now yours\n`;
+        if (cardTomatoBack > 0 && priceDifferenceTomatoBack > 0) {
+            yaaymes += `The second highest bid was **${priceDifferenceTomatoBack}** tomatoes less than yours so you got the difference back in addition to the normal ${cardTomatoBack}\nIn total, you got ${tomatoback} tomatoes back`
+        }
+        else if (priceDifferenceTomatoBack > 0) {
+            yaaymes += `The second highest bid was **${priceDifferenceTomatoBack}** tomatoes less than yours so you got the difference back`;
+        }
+        else if (cardTomatoBack > 0) {
+            yaaymes += `You got **${cardTomatoBack}** tomatoes back from that transaction`;
+        }
         bot.sendMessage({to: auc.lastbidder, embed: utils.formatConfirm(null, "Yaaay!", yaaymes)});
         bot.sendMessage({to: auc.author, embed: utils.formatConfirm(null, null, 
-            "Your auction for card **" + utils.getFullCard(auc.card) + "** finished!\n"
-            + "You got **" + auc.price + "**🍅 for it")});
+            `Your auction for card **${utils.getFullCard(auc.card)}** finished!\nYou got **${auc.price}**🍅 for it`)});
     } else {
         dbuser.cards = dbManager.addCardToUser(dbuser.cards, auc.card);
         await ucollection.update({discord_id: auc.author}, {$set: {cards: dbuser.cards}});
