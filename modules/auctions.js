@@ -344,6 +344,80 @@ async function info(user, args, channelID, callback) {
     });
 }
 
+async function updateEval(card, price, aucID) {
+    // Update eval price?
+    let minSamples = 3; // eval will start returning the new eval system's price when it has this many samples.
+    let maxSamples = 10; // the system will remove samples to make room for new ones after this mark is reached.
+    let lowerBound = .50;
+    let upperBound = 4;
+    // Note: min and max samples above should not be the same number.
+    let cardQuery = utils.getCardQuery(card);
+    dbManager.getCard(cardQuery).then((match) => {
+        if ( !match.hasOwnProperty('evalSamples') )
+            match.evalSamples = [];
+        let isOutlier;
+        if ( match.hasOwnProperty('eval') ) {
+            // How does this auction's price compare to the stored eval price?
+            isOutlier = price < match.eval * lowerBound || price > match.eval * upperBound;
+        } else { 
+            isOutlier = false;
+        }
+        if ( match.eval && price > 2 * match.eval ) {
+            //fraud detection
+            mongodb.collection("overpricedAucs").insert({"aucId": aucID,
+                "factor": parseFloat(price/match.eval), "date": new Date()});
+        }
+        if ( !isOutlier ) { 
+            // Add the new sample price.
+            match.evalSamples.push(price);
+            // Trim the sample array if it's large enough already.
+            while ( match.evalSamples.length > maxSamples )
+                match.evalSamples.shift(); 
+            client.sendMessage({"to":settings.logchannel, "message":`Updating eval samples for **${utils.getFullCard(match)}**: ${JSON.stringify(match.evalSamples)}`});
+            // Only update the eval price if enough sample prices exist.
+            if ( match.evalSamples.length == minSamples ) {
+                // This card is reaching the threshhold for the first time. Make sure its samples somewhat agree.
+                client.sendMessage({"to":settings.logchannel, "message":`**${utils.getFullCard(match)}** has reached **${minSamples}** auction sales. Checking integrity of samples:\n ${JSON.stringify(match.evalSamples)}`});
+                let largeDisparity = false;
+                for(let i=0; i<match.evalSamples.length; i++) {
+                    let othersSum = 0;
+                    for(let j=0; j<match.evalSamples.length; j++) {
+                        if (j!=i)
+                            othersSum += match.evalSamples[j];
+                        //let percentDiff = (match.evalSamples[i] - match.evalSamples[j]) / match.evalSamples[j];
+                        //if ( percentDiff < 1-tolerance || percentDiff > 1+tolerance )
+                        //   largeDisparity = true;
+                    }
+                    let othersAve = othersSum / (minSamples -1);
+                    if ( match.evalSamples[i] < othersAve * lowerBound || match.evalSamples[i] > othersAve * upperBound )
+                        largeDisparity = true;
+                }
+                if ( largeDisparity ) {
+                    // This sample set is untrustworthy. Throw it out and wait for new data.
+                    match.evalSamples = [];
+                    client.sendMessage({"to":settings.logchannel, "message":'The samples were **thrown out**'});
+                } else {
+                    client.sendMessage({"to":settings.logchannel, "message":'The samples were **acceptable**'});
+                }
+            }
+            if ( match.evalSamples.length >= minSamples ) {
+                // Calculate a new eval average from the samples.
+                match.eval = Math.round(match.evalSamples.reduce(function(a,b) {return a+b;}) / match.evalSamples.length);
+                client.sendMessage({"to":settings.logchannel, "message":'Updating eval for **'+  utils.getFullCard(match) +'**: '+ match.eval});
+            }
+            let colName = dbManager.getCardDbColName(match);
+            mongodb.collection(colName).save(match).catch(function() {
+                client.sendMessage({"to":settings.logchannel, "message":'Could not save card back with new eval data: ' + utils.getFullCard(match)});
+            });
+        } else {
+            client.sendMessage({"to":settings.logchannel, "message":'Auction outlier ignored for eval figuring: ' +JSON.stringify(auc)});
+        }
+    }).catch(function() {
+        client.sendMessage({"to":settings.logchannel, "message":'Problem running eval price update for this auction:'+
+            "\n"+ JSON.stringify(auc)});
+    });
+}
+
 async function checkAuctionList(client) {
     let timeago = new Date();
     timeago.setHours(timeago.getHours() - aucTime);
@@ -387,77 +461,7 @@ async function checkAuctionList(client) {
         transaction.card = auc.card;
         await tcollection.insert(transaction);
 
-        // Update eval price?
-        let minSamples = 3; // eval will start returning the new eval system's price when it has this many samples.
-        let maxSamples = 10; // the system will remove samples to make room for new ones after this mark is reached.
-        let lowerBound = .50;
-        let upperBound = 4;
-        // Note: min and max samples above should not be the same number.
-        let cardQuery = utils.getCardQuery(auc.card);
-        dbManager.getCard(cardQuery).then((match) => {
-            if ( !match.hasOwnProperty('evalSamples') )
-                match.evalSamples = [];
-            let isOutlier;
-            if ( match.hasOwnProperty('eval') ) {
-                // How does this auction's price compare to the stored eval price?
-                isOutlier = auc.price < match.eval * lowerBound || auc.price > match.eval * upperBound;
-            } else { 
-                isOutlier = false;
-            }
-            if ( match.eval && auc.price > 2 * match.eval ) {
-                //fraud detection
-                mongodb.collection("overpricedAucs").insert({"aucId": auc.id,
-                    "factor": parseFloat(auc.price/match.eval), "date": new Date()});
-            }
-            if ( !isOutlier ) { 
-                // Add the new sample price.
-                match.evalSamples.push(auc.price);
-                // Trim the sample array if it's large enough already.
-                while ( match.evalSamples.length > maxSamples )
-                    match.evalSamples.shift(); 
-                client.sendMessage({"to":settings.logchannel, "message":`Updating eval samples for **${utils.getFullCard(match)}**: ${JSON.stringify(match.evalSamples)}`});
-                // Only update the eval price if enough sample prices exist.
-                if ( match.evalSamples.length == minSamples ) {
-                    // This card is reaching the threshhold for the first time. Make sure its samples somewhat agree.
-                    client.sendMessage({"to":settings.logchannel, "message":`**${utils.getFullCard(match)}** has reached **${minSamples}** auction sales. Checking integrity of samples:\n ${JSON.stringify(match.evalSamples)}`});
-                    let largeDisparity = false;
-                    for(let i=0; i<match.evalSamples.length; i++) {
-                        let othersSum = 0;
-                        for(let j=0; j<match.evalSamples.length; j++) {
-                            if (j!=i)
-                                othersSum += match.evalSamples[j];
-                            //let percentDiff = (match.evalSamples[i] - match.evalSamples[j]) / match.evalSamples[j];
-                            //if ( percentDiff < 1-tolerance || percentDiff > 1+tolerance )
-                            //   largeDisparity = true;
-                        }
-                        let othersAve = othersSum / (minSamples -1);
-                        if ( match.evalSamples[i] < othersAve * lowerBound || match.evalSamples[i] > othersAve * upperBound )
-                            largeDisparity = true;
-                    }
-                    if ( largeDisparity ) {
-                        // This sample set is untrustworthy. Throw it out and wait for new data.
-                        match.evalSamples = [];
-                        client.sendMessage({"to":settings.logchannel, "message":'The samples were **thrown out**'});
-                    } else {
-                        client.sendMessage({"to":settings.logchannel, "message":'The samples were **acceptable**'});
-                    }
-                }
-                if ( match.evalSamples.length >= minSamples ) {
-                    // Calculate a new eval average from the samples.
-                    match.eval = Math.round(match.evalSamples.reduce(function(a,b) {return a+b;}) / match.evalSamples.length);
-                    client.sendMessage({"to":settings.logchannel, "message":'Updating eval for **'+  utils.getFullCard(match) +'**: '+ match.eval});
-                }
-                let colName = dbManager.getCardDbColName(match);
-                mongodb.collection(colName).save(match).catch(function() {
-                    client.sendMessage({"to":settings.logchannel, "message":'Could not save card back with new eval data: ' + utils.getFullCard(match)});
-                });
-            } else {
-                client.sendMessage({"to":settings.logchannel, "message":'Auction outlier ignored for eval figuring: ' +JSON.stringify(auc)});
-            }
-        }).catch(function() {
-            client.sendMessage({"to":settings.logchannel, "message":'Problem running eval price update for this auction:'+
-                "\n"+ JSON.stringify(auc)});
-        });
+        await updateEval(auc.card, auc.price, auc.id);
 
         let yaaymes = "You won an auction for **" + utils.getFullCard(auc.card) + "**!\nCard is now yours.\n";
         if(tomatoback > 0) yaaymes += "You got **" + tomatoback + "** tomatoes back from that transaction.";
@@ -470,6 +474,7 @@ async function checkAuctionList(client) {
         mongodb.collection("aucSellRate").update({"discord_id":auc.author},
               {$inc:{"sold":1}}, {"upsert":true});
     } else {
+        await updateEval(auc.card, Math.ceil(auc.price * 0.75), auc.id);
         await dbManager.pushCard(auc.author, auc.card);
         utils.sendDM(auc.author, utils.formatError(null, null, 
             "Your auction for card **" + utils.getFullCard(auc.card) + "** finished, but nobody bid on it.\n"
